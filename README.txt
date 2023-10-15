@@ -16,11 +16,6 @@ Training and testing kernel ridge regression on binary MNIST and binary CIFAR10.
 
 KARE prediction, as explained in Appendix B.
 
-$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$
-mathematica coff Bordelon app A [NEED AXTIVATIONS]
-fig 9: eval sc and gram
-fig 10: coeff
-
 
 
  
