@@ -1,0 +1,205 @@
+import torch
+import torch.nn.functional as F
+import numpy as np
+import time
+import sys
+from scipy import integrate
+from scipy.special import gamma
+
+
+def pdf(chi,x,sigma_pdf):   
+    return np.exp(-(x/sigma_pdf)**2)*np.abs(x)**(chi)
+
+def generate_pdf(min_int,max_int,chi,n_gen,sigma_pdf,bool_test):    
+    pt_gen = np.zeros(n_gen)
+    if (max_int<np.sqrt(chi/2)) :
+        C = pdf(chi,max_int,sigma_pdf)
+    elif(min_int>np.sqrt(chi/2)) :
+
+        C = pdf(chi,min_int,sigma_pdf)
+    else:
+        C=  pdf(chi,np.sqrt(chi/2),sigma_pdf)
+    
+    #NORM = ((sigma_pdf)**(1+chi))*gamma((1+chi)/2)  
+    count=0
+    while(count < n_gen):
+        uu=  np.random.rand(1)*(max_int-min_int) + min_int
+        vv = np.random.rand(1)*(C)
+        
+        if (vv <= (pdf(chi,uu,sigma_pdf))):
+            pt_gen[count]= uu
+            count+=1 
+    return pt_gen  
+
+def gen_data(N_TRAIN,chi, max_int, d_perp,sigma_pdf,bool_test,xi):
+    gamma = 1
+    
+    n_train = int(N_TRAIN)
+    n_test = int(N_TEST)
+       
+    x_train = np.zeros((n_train,d_perp+1))
+    half =int((n_train)/2)
+    x_train[:half,0]= generate_pdf(0, max_int,chi ,half,sigma_pdf,bool_test)
+    for ii in range(half):
+        x_train[(half+ii),0] = - x_train[ii,0]
+    
+    for jj in range(d_perp):
+        x_all[:,jj+1] =  np.random.normal(0, gamma, n_train+n_test)  
+    
+    lab_train = np.zeros(n_train)
+    for jj in range(n_train):
+        if(x_train[jj,0] > 0): 
+            lab_train[jj]=+np.abs(x_train[jj])**xi
+        else:
+            lab_train[jj]=-np.abs(x_train[jj])**xi
+
+    return x_train, lab_train
+
+def gram_lap_1d(X: torch.tensor, Y: torch.tensor, sigma=100):
+    '''
+    X, Y tensors of shape P, 1, d
+    '''
+    n_x = X.size(0)
+    n_y = Y.size(0)
+
+
+    kernel = torch.exp( -torch.cdist(X, Y, p=2) / sigma)
+    
+    return kernel.squeeze()
+
+def build_pred(K_trtr,y_tr,ridge):
+    return  torch.linalg.inv(K_trtr + ridge * torch.eye(y_tr.size(0)).to(device))@y_tr
+
+def krr_pred(alpha, K_tetr, x_te, y_te, n_test,chi,sigma_pdf):
+   
+    f = K_tetr@alpha 
+    
+    p_te = torch.zeros(n_test)
+    for ii in range(n_test):
+        p_te[ii] = (1./gamma((1+chi)/2))*pdf(chi,x_te[ii].item(),sigma_pdf)
+    p_te = p_te.double().to(device)
+    mse = p_te*(f - y_te).pow(2)
+    return torch.trapz(mse, x_te)
+
+def find_length(alpha,x_te_der, x_train):
+    K_tetr = gram_lap_1d(x_te_der, x_train)
+    f = K_tetr@alpha
+    ders = torch.zeros(len(x_te_der))
+    for xx in range(len(x_te_der)-1):
+        ders[xx] = (f[xx+1] -f[xx])/(x_te_der[xx+1]-x_te_der[xx])
+    ind_x_cutoff = np.argmin(np.abs(ders-np.full(len(ders),0.1*ders[0])))
+    
+    return x_te_der[ind_x_cutoff].item()
+
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+print(device)
+d_perp=0
+
+sigma_pdf = 1
+max_int= sigma_pdf*3  #see cell above
+
+num_decadi= 4
+n_tr=torch.zeros(5*num_decadi+3)
+for hh in range(0,num_decadi):
+    n_tr[5*hh]= 1*(10**hh)
+    n_tr[5*hh+1]= 2*(10**hh)
+    n_tr[5*hh+2]= 3*(10**hh)
+    n_tr[5*hh+3]= 4*(10**hh)
+    n_tr[5*hh+4]= 5*(10**hh)
+n_tr[5*num_decadi]=(6.5)*10**3
+n_tr[5*num_decadi+1]=(8.5)*10**3
+n_tr[5*num_decadi+2]=10**4
+
+n_tr = n_tr.to(device)
+count=0
+
+num_rip = int(sys.argv[1]) 
+N_TEST = int(sys.argv[2])
+lamb_exp = float(sys.argv[3])
+chi = int(sys.argv[4])
+xi = int(sys.argv[5])
+
+ridge = 10.**(-lamb_exp)
+
+start_time=time.time()
+
+err_krr = torch.zeros((5*num_decadi+3,num_rip)).to(device)
+
+
+ss=100
+for jj in n_tr:
+    ii=0
+    
+    if(count>4 and count<23):
+        while( ii< num_rip):
+            x_train, lab_train = gen_data(jj,chi, max_int,d_perp,sigma_pdf,0,xi)
+ 
+                       
+            if(ridge<(1/ss)*(int(jj))**(-1/(chi+1))):
+            	x1 = (int(jj))**(-1/(1+chi))             
+            else:
+                x1 = ((ss*ridge/int(jj))**(1/(2+chi)))
+            print("x1: "+str(x1))
+            if(x1>=max_int):
+                x1 = max_int
+            x_train = torch.from_numpy(x_train).to(device)
+            lab_train = torch.from_numpy(lab_train).to(device)
+            student_trtr = gram_lap_1d(x_train.reshape(int(jj), 1), x_train.reshape(int(jj), 1)) 
+            alpha = build_pred(student_trtr, lab_train, ridge) 
+            
+            max_der = min(100*x1,max_int)
+            steps=10000
+            x_te_der = torch.linspace(0,max_der ,steps).double().to(device)     
+            x1 = find_length(alpha, x_te_der.reshape(steps, 1),x_train.reshape(int(jj), 1))
+            
+            print("x1: "+str(x1))
+            m = int(np.floor(max_int/x1))
+            ee = np.exp(-1)
+            CC = N_TEST 
+            q = max(int(((10**5)/(m))+2),2000)
+            print("q: "+str(q))
+
+            real_n_test = 0
+            for tt in range(m):
+                    real_n_test += int(CC*ee**(tt))+q
+            print("real n test: "+ str(real_n_test))
+            flagg =0
+            tt=0
+            while(tt<m and flagg==0): 
+                n_i = int(CC*ee**(tt))+q
+                
+                if(tt==m-1):
+                    ma_int = max_int
+                else:
+                    ma_int =  (tt+1)*x1 #.item()
+                    
+                x_test= torch.linspace(tt*x1,ma_int,n_i).double().to(device)
+	        for jj in range(n_i):
+        	    if(x_test[jj] > 0): 
+                        lab_test[jj]=+np.abs(x_test[jj])**xi
+       		    else:
+           	        lab_test[jj]=-np.abs(x_test[jj])**xi
+		             
+                lab_test = (lab_test).to(device)     
+
+                student_tetr = gram_lap_1d(x_test.reshape(n_i, 1), x_train.reshape(int(jj), 1))
+                  
+                contribute = 2*krr_pred(alpha,student_tetr,x_test, lab_test,n_i,chi,sigma_pdf)
+                if(contribute<1e-13):
+                    flagg = 1
+                else:
+                    err_krr[count,ii] += contribute     #zz* kernel_regression_pred(alpha,student_tetr, lab_test)
+                tt+=1
+                         
+            print("num_rip: "+str(ii)+" - Err: "+str(err_krr[count,ii].cpu().numpy()))
+            
+            ii+=1
+        print(jj)
+        print(count)
+        print("--- %s seconds ---" % (time.time() - start_time))
+    count+=1
+    np.savetxt("KRR_impSamp_chi_%d_dp_%d_numRip_%d_lambda_%f.txt" %(chi,d_perp,num_rip,lamb_exp),err_krr.cpu())
+
+
+
+

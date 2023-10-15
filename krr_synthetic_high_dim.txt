@@ -1,0 +1,134 @@
+import torch
+import torch.nn.functional as F
+import numpy as np
+import time
+import sys
+from scipy.special import gamma
+
+
+def pdf(chi,x,sigma_pdf):   
+    return np.exp(-(x/sigma_pdf)**2)*np.abs(x)**(chi)
+
+def generate_pdf(min_int,max_int,chi,n_gen,sigma_pdf,bool_test):    
+    pt_gen = np.zeros(n_gen)
+    if (max_int<np.sqrt(chi/2)) :
+        C = pdf(chi,max_int,sigma_pdf)
+    else:
+        C=  pdf(chi,np.sqrt(chi/2),sigma_pdf)
+    
+    #NORM = ((sigma_pdf)**(1+chi))*gamma((1+chi)/2)  
+    count=0
+    while(count < n_gen):
+        uu=  np.random.rand(1)*(max_int-min_int) + min_int
+        vv = np.random.rand(1)*(C)
+        
+        if (vv <= (pdf(chi,uu,sigma_pdf))):
+            pt_gen[count]= uu
+            count+=1 
+    return pt_gen  
+
+def gen_data(N_TRAIN,chi, max_int, d_perp,sigma_pdf,bool_test):
+    gamma = 1
+    
+    n_train = int(N_TRAIN)
+    n_test = int(N_TEST)
+       
+    x_train = np.zeros((n_train,d_perp+1))
+    half =int((n_train)/2)
+    x_train[:half,0]= generate_pdf(0, max_int,chi ,half,sigma_pdf,bool_test)
+    for ii in range(half):
+        x_train[(half+ii),0] = - x_train[ii,0]
+    
+    for jj in range(d_perp):
+        x_train[:,jj+1] =  np.random.normal(0, gamma, n_train)  
+    
+    lab_train = np.zeros(n_train)
+    for jj in range(n_train):
+        if(x_train[jj,0] > 0): 
+            lab_train[jj]=+1
+        else:
+            lab_train[jj]=-1
+
+    return x_train, lab_train
+
+def gram_lap(X: torch.tensor, Y: torch.tensor, sigma=100):
+    '''
+    X, Y tensors of shape P, 1, d
+    '''
+    n_x = X.size(0)
+    n_y = Y.size(0)
+
+
+    kernel = torch.exp( -torch.cdist(X, Y, p=2) / sigma)
+    
+    return kernel.squeeze()
+
+def kernel_regression(K_trtr, K_tetr, y_tr, y_te, ridge):
+    alpha = torch.linalg.inv(K_trtr + ridge * torch.eye(y_tr.size(0)).to(device))@y_tr
+    f = K_tetr@alpha
+    mse = (f - y_te).pow(2).mean()
+    return mse
+
+
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+print(device)
+
+sigma_pdf = 1
+max_int= sigma_pdf*3  #see cell above
+
+num_decadi= 4
+n_tr=torch.zeros(5*num_decadi+3)
+for hh in range(0,num_decadi):
+    n_tr[5*hh]= 1*(10**hh)
+    n_tr[5*hh+1]= 2*(10**hh)
+    n_tr[5*hh+2]= 3*(10**hh)
+    n_tr[5*hh+3]= 4*(10**hh)
+    n_tr[5*hh+4]= 5*(10**hh)
+n_tr[5*num_decadi]=(6.5)*10**3
+n_tr[5*num_decadi+1]=(8.5)*10**3
+n_tr[5*num_decadi+2]=10**4
+
+n_tr = n_tr.to(device)
+count=0
+
+num_rip = int(sys.argv[1]) 
+N_TEST = int(sys.argv[2])
+lamb_exp = float(sys.argv[3])
+chi = float(sys.argv[4])
+d_perp = float(sys.argv[5])
+
+ridge = 10.**(-lamb_exp)
+
+start_time=time.time()
+
+err_krr = torch.zeros((5*num_decadi+3,num_rip)).to(device)
+
+x_test, lab_test = gen_data(N_TEST,chi, max_int,d_perp,sigma_pdf,0)
+x_test = torch.from_numpy(x_test).to(device)
+lab_test = torch.from_numpy(lab_test).to(device)
+for jj in n_tr:
+         
+    if(count>4 and count<23):
+        for ii in range(num_rip):
+            x_train, lab_train = gen_data(jj,chi, max_int,d_perp,sigma_pdf,0)
+            x_train = torch.from_numpy(x_train).to(device)
+            lab_train = torch.from_numpy(lab_train).to(device)
+            x1 = 20*(int(jj))**(-1/(1+d_perp+chi))
+            if(x1>=max_int):
+                x1= max_int
+            x_test, lab_test = gen_data(N_TEST,chi, x1,d_perp,sigma_pdf,0)
+            x_test = torch.from_numpy(x_test).to(device)
+            lab_test = torch.from_numpy(lab_test).to(device)
+
+
+            student_trtr = gram_lap(x_train.reshape(int(jj), 1+d_perp), x_train.reshape(int(jj), 1+d_perp))
+            student_tetr = gram_lap(x_test.reshape(int(N_TEST), 1+d_perp), x_train.reshape(int(jj), 1+d_perp))
+
+            err_krr[count,ii] = kernel_regression(student_trtr, student_tetr, lab_train, lab_test, ridge)
+            print("num_rip: "+str(ii)+" - Err: "+str(err_krr[count,ii].cpu().numpy()))
+        print(jj)
+        print(count)
+        print("--- %s seconds ---" % (time.time() - start_time))
+    count+=1
+    np.savetxt("KRR_sharp_chi_%d_dp_%d_numRip_%d_lambda_%f.txt" %(chi,d_perp,num_rip,lamb_exp),err_krr.cpu())
+

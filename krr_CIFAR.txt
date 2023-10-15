@@ -1,0 +1,100 @@
+import torch
+import numpy as np
+import time
+import sys
+from scipy import integrate
+from scipy.special import gamma
+from torchvision import datasets, transforms
+
+def gram_lap_1d(X: torch.tensor, Y: torch.tensor, sigma=100):
+    '''
+    X, Y tensors of shape P, 1, d
+    '''
+    kernel = torch.exp( -torch.cdist(X, Y, p=2) / sigma)
+    
+    return kernel.squeeze()
+
+def build_pred(K_trtr,y_tr,ridge):
+    
+    return  torch.linalg.inv(K_trtr + ridge * torch.eye(y_tr.size(0)).to(device))@y_tr
+
+def krr_pred(alpha, K_tetr, y_te):
+    f = K_tetr@alpha 
+    return (f - y_te).pow(2).mean()
+    
+
+
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+print(device)
+
+transform = transforms.Compose([transforms.ToTensor(), transforms.Normalize((0.5,0.5,0.5),(0.5,0.5,0.5))])
+
+num_decadi= 4
+n_tr=torch.zeros(5*num_decadi+3)
+for hh in range(0,num_decadi):
+    n_tr[5*hh]= 1*(10**hh)
+    n_tr[5*hh+1]= 2*(10**hh)
+    n_tr[5*hh+2]= 3*(10**hh)
+    n_tr[5*hh+3]= 4*(10**hh)
+    n_tr[5*hh+4]= 5*(10**hh)
+n_tr[5*num_decadi]=(6.5)*10**3
+n_tr[5*num_decadi+1]=(8.5)*10**3
+n_tr[5*num_decadi+2]=10**4
+
+n_tr = n_tr.to(device)
+count=0
+
+num_rip = int(sys.argv[1]) 
+N_TEST =  int(sys.argv[2])
+lamb_exp = float(sys.argv[3])
+
+testset = datasets.CIFAR10(root='./data', train=False, download=True, transform=transform)
+testloader = torch.utils.data.DataLoader(testset, batch_size=N_TEST)
+dataiter = iter(testloader)
+X_te, y_te = dataiter.next()
+y_te = 2 * (y_te % 2) - 1
+
+x_test= X_te.to(device)
+lab_test = y_te.to(device)
+
+
+ridge = 10.**(-lamb_exp)
+#ridge = 0
+start_time=time.time()
+
+err_krr = torch.zeros((5*num_decadi+3,num_rip)).to(device)
+
+ss=100
+for jj in n_tr:
+    ii=0
+    
+    if(count>4 and count<23):
+        while( ii< num_rip):
+            trainset = datasets.CIFAR10(root='./data', train=True, download=True, transform=transform)
+            trainloader = torch.utils.data.DataLoader(trainset, batch_size=int(jj), shuffle=True)
+            dataiter = iter(trainloader)
+            X_tr, y_tr = dataiter.next()
+            y_tr = 2 * (y_tr % 2) - 1         
+
+            x_train = X_tr.to(device)
+            lab_train = y_tr.to(device).float()
+            
+            num_dim =  x_train.shape[1]*x_train.shape[2]*x_train.shape[3]
+            print(num_dim)
+            student_trtr = gram_lap_1d(x_train.reshape(int(jj), num_dim), x_train.reshape(int(jj), num_dim)) 
+            alpha = build_pred(student_trtr, lab_train, ridge) 
+            
+            student_tetr = gram_lap_1d(x_test.reshape(N_TEST, num_dim), x_train.reshape(int(jj), num_dim))
+
+            err_krr[count,ii] = krr_pred(alpha,student_tetr, lab_test)     #zz* kernel_regression_pred(alpha,student_tetr, lab_test)
+
+                         
+            print("num_rip: "+str(ii)+" - Err: "+str(err_krr[count,ii].cpu().numpy()))
+            #np.savetxt("KRR_impSamp_chi_%d_dp_%d_numRip_%d_lambda_%f.txt" %(chi,d_perp,num_rip,lamb_exp),err_krr.cpu())
+            ii+=1
+        print(jj)
+        print(count)
+        print("--- %s seconds ---" % (time.time() - start_time))
+    count+=1
+    np.savetxt("KRR_CIFAR10_numRip_%d_lambda_%f_Ntest_%d.txt" %(num_rip,lamb_exp,N_TEST),err_krr.cpu())
+
